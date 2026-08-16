@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>AI Pushup Pro</title>
+    
+    <!-- Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- MediaPipe Pose tracking libraries -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap');
+
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000000;
+            font-family: 'Inter', sans-serif;
+            color: #ffffff;
+            user-select: none;
+        }
+
+        /* Fullscreen Canvas */
+        #output_canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            object-fit: cover;
+            z-index: 1;
+            transform: scaleX(-1); /* Mirror effect */
+            filter: grayscale(100%) contrast(110%) brightness(50%);
+            transition: filter 0.2s ease;
+        }
+
+        .rep-flash {
+            filter: grayscale(100%) contrast(150%) brightness(90%) !important;
+        }
+
+        /* UI Overlays */
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 10;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+
+        .interactive {
+            pointer-events: auto;
+        }
+
+        /* Animations */
+        @keyframes pulse-fast {
+            0%, 100% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.02); opacity: 0.7; }
+        }
+        .animate-pulse-fast {
+            animation: pulse-fast 1s infinite;
+        }
+
+        @keyframes float-up {
+            0% { opacity: 1; transform: translateY(0) scale(1); }
+            100% { opacity: 0; transform: translateY(-80px) scale(1.2); }
+        }
+        .floating-number {
+            position: absolute;
+            color: #ffffff;
+            font-size: 4rem;
+            font-weight: 800;
+            animation: float-up 1s ease-out forwards;
+            pointer-events: none;
+            z-index: 50;
+        }
+
+        /* Custom Scrollbar for leaderboard */
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: #000; }
+        ::-webkit-scrollbar-thumb { background: #fff; border-radius: 0px; }
+    </style>
+</head>
+<body>
+
+    <!-- Hidden video element for camera feed -->
+    <video class="input_video hidden" playsinline></video>
+    
+    <!-- Canvas for rendering video and pose landmarks -->
+    <canvas class="output_canvas" id="output_canvas"></canvas>
+
+    <!-- Main UI Container -->
+    <div id="ui-layer">
+        
+        <!-- ================= MAIN MENU ================= -->
+        <div id="screen-menu" class="absolute inset-0 flex flex-col items-center justify-center bg-black/90 backdrop-blur-md z-50 interactive">
+            <h1 class="text-5xl md:text-7xl font-extrabold mb-2 text-white text-center tracking-tight">AI PUSHUP<span class="font-light">PRO</span></h1>
+            <p class="text-lg md:text-xl text-gray-400 mb-10 tracking-widest text-center px-4 uppercase">60-Second Challenge</p>
+            
+            <div class="bg-black border border-gray-700 p-8 rounded-none max-w-md w-full mx-4 mb-8 text-sm md:text-base">
+                <h3 class="text-white text-lg font-bold mb-6 border-b border-gray-800 pb-2 uppercase tracking-wider">Instructions</h3>
+                <ul class="space-y-4 text-gray-300">
+                    <li class="flex items-start"><span class="text-white mr-3 font-bold">1.</span> Allow camera access.</li>
+                    <li class="flex items-start"><span class="text-white mr-3 font-bold">2.</span> Step back so your entire upper body is visible.</li>
+                    <li class="flex items-start"><span class="text-white mr-3 font-bold">3.</span> Go down until your elbows break 100°.</li>
+                    <li class="flex items-start"><span class="text-white mr-3 font-bold">4.</span> Push up until your arms are mostly straight (>150°).</li>
+                    <li class="flex items-start"><span class="text-white mr-3 font-bold">5.</span> Do as many as possible in 60 seconds.</li>
+                </ul>
+            </div>
+
+            <div id="loading-indicator" class="text-white font-bold animate-pulse mb-6 text-sm tracking-widest uppercase">
+                Initializing AI Model...
+            </div>
+
+            <button id="btn-start" class="hidden interactive px-12 py-4 bg-white text-black font-bold text-lg hover:bg-gray-200 transition-colors uppercase tracking-widest">
+                Start Challenge
+            </button>
+            
+            <button id="btn-leaderboard" class="mt-6 interactive px-6 py-2 text-gray-400 text-xs hover:text-white uppercase tracking-widest underline decoration-gray-600 underline-offset-4">
+                View Leaderboard
+            </button>
+        </div>
+
+        <!-- ================= HUD (Heads Up Display during gameplay) ================= -->
+        <div id="screen-game" class="hidden w-full h-full flex flex-col justify-between p-6 md:p-10">
+            <!-- Top Bar: Timer -->
+            <div class="flex justify-center w-full">
+                <div class="bg-black/80 border border-gray-800 px-8 py-3 flex items-center gap-4">
+                    <span class="text-gray-400 uppercase tracking-widest text-xs font-bold">Time</span>
+                    <span id="hud-timer" class="text-3xl font-black text-white w-12 text-center">60</span>
+                </div>
+            </div>
+
+            <!-- Center: Form Guidance -->
+            <div class="flex-1 flex items-center justify-center pointer-events-none">
+                <div id="form-feedback" class="text-3xl md:text-4xl font-bold text-white opacity-50 text-center uppercase tracking-widest bg-black/50 px-8 py-4 transition-opacity duration-300">
+                    Get in Position
+                </div>
+            </div>
+
+            <!-- Bottom Bar: Score -->
+            <div class="flex justify-between items-end w-full">
+                <div class="bg-black/80 border border-gray-800 px-8 py-6 flex flex-col items-center min-w-[150px]">
+                    <span class="text-gray-400 uppercase tracking-widest text-xs font-bold mb-2">Reps</span>
+                    <span id="hud-score" class="text-6xl md:text-7xl font-black text-white leading-none">0</span>
+                </div>
+                
+                <div class="bg-black/80 border border-gray-800 p-5 text-right hidden md:block">
+                    <p class="text-xs text-gray-500 uppercase tracking-widest mb-1">State</p>
+                    <p id="hud-stage" class="text-xl font-bold text-white uppercase">WAITING</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- ================= GAME OVER / RESULTS ================= -->
+        <div id="screen-result" class="hidden absolute inset-0 flex-col items-center justify-center bg-black/95 backdrop-blur-md z-50 interactive">
+            <h2 class="text-4xl md:text-5xl font-bold mb-6 text-white uppercase tracking-widest">Time's Up</h2>
+            
+            <div class="bg-black border border-gray-800 p-10 flex flex-col items-center mb-10 min-w-[300px]">
+                <span class="text-gray-400 uppercase tracking-widest text-sm font-bold mb-4">Total Reps</span>
+                <span id="result-score" class="text-7xl font-black text-white leading-none">0</span>
+            </div>
+
+            <div class="flex gap-2 w-full max-w-sm px-4">
+                <input type="text" id="player-name" placeholder="YOUR NAME" maxlength="10" class="flex-1 bg-transparent border border-gray-600 text-white px-4 py-3 font-bold uppercase tracking-widest focus:outline-none focus:border-white text-center placeholder-gray-600">
+                <button id="btn-save" class="interactive px-8 py-3 bg-white text-black font-bold hover:bg-gray-200 transition-colors uppercase tracking-widest">
+                    Save
+                </button>
+            </div>
+
+            <button id="btn-retry" class="mt-8 interactive px-8 py-3 bg-transparent text-gray-400 border border-gray-600 font-bold hover:bg-white hover:text-black hover:border-white transition-all uppercase tracking-widest text-sm">
+                Play Again
+            </button>
+        </div>
+
+        <!-- ================= LEADERBOARD ================= -->
+        <div id="screen-leaderboard" class="hidden absolute inset-0 flex-col items-center justify-center bg-black/95 backdrop-blur-xl z-[60] interactive">
+            <h2 class="text-3xl md:text-4xl font-bold mb-10 text-white uppercase tracking-widest">Leaderboard</h2>
+            
+            <div class="w-full max-w-md bg-black border border-gray-800 overflow-hidden mb-10">
+                <div class="bg-gray-900 px-6 py-4 border-b border-gray-800 flex justify-between text-gray-400 font-bold uppercase text-xs tracking-wider">
+                    <span>Rank / Name</span>
+                    <span>Score</span>
+                </div>
+                <div id="leaderboard-list" class="max-h-[40vh] overflow-y-auto">
+                    <!-- Leaderboard items injected here via JS -->
+                </div>
+            </div>
+
+            <button id="btn-close-leaderboard" class="interactive px-10 py-3 bg-transparent text-white border border-gray-600 hover:bg-white hover:text-black transition-all uppercase tracking-widest font-bold text-sm">
+                Close
+            </button>
+        </div>
+
+    </div>
+
+    <script>
+        /**
+         * CYBERPUSH GAME LOGIC
+         * Combines MediaPipe Pose tracking with game state management.
+         */
+
+        // --- DOM Elements ---
+        const videoElement = document.getElementsByClassName('input_video')[0];
+        const canvasElement = document.getElementsByClassName('output_canvas')[0];
+        const canvasCtx = canvasElement.getContext('2d');
+        
+        // Screens
+        const screenMenu = document.getElementById('screen-menu');
+        const screenGame = document.getElementById('screen-game');
+        const screenResult = document.getElementById('screen-result');
+        const screenLeaderboard = document.getElementById('screen-leaderboard');
+        
+        // UI Elements
+        const loadingIndicator = document.getElementById('loading-indicator');
+        const btnStart = document.getElementById('btn-start');
+        const btnRetry = document.getElementById('btn-retry');
+        const btnSave = document.getElementById('btn-save');
+        const btnLeaderboard = document.getElementById('btn-leaderboard');
+        const btnCloseLeaderboard = document.getElementById('btn-close-leaderboard');
+        const playerNameInput = document.getElementById('player-name');
+        
+        // HUD Elements
+        const hudScore = document.getElementById('hud-score');
+        const hudTimer = document.getElementById('hud-timer');
+        const hudStage = document.getElementById('hud-stage');
+        const formFeedback = document.getElementById('form-feedback');
+        const resultScore = document.getElementById('result-score');
+
+        // --- Game State Variables ---
+        const GAME_DURATION = 60; // 60 seconds
+        let isModelLoaded = false;
+        let isPlaying = false;
+        let score = 0;
+        let timeLeft = GAME_DURATION;
+        let timerInterval = null;
+        
+        // Pushup tracking state
+        let pushupStage = "up"; // "up" or "down"
+        let goodForm = false;
+
+        // Configuration
+        const ANGLE_DOWN_THRESHOLD = 95; // Degrees elbow must break to count as down
+        const ANGLE_UP_THRESHOLD = 150; // Degrees elbow must reach to count as up (straight)
+
+        // --- Audio Synthesizer (No external assets) ---
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        
+        function playBeep(type) {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            
+            const oscillator = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+            
+            oscillator.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+            
+            if (type === 'down') {
+                oscillator.type = 'sine';
+                oscillator.frequency.setValueAtTime(300, audioCtx.currentTime);
+                gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
+                oscillator.start();
+                oscillator.stop(audioCtx.currentTime + 0.1);
+            } else if (type === 'up') {
+                oscillator.type = 'triangle';
+                oscillator.frequency.setValueAtTime(800, audioCtx.currentTime);
+                oscillator.frequency.exponentialRampToValueAtTime(1200, audioCtx.currentTime + 0.1);
+                gainNode.gain.setValueAtTime(0.2, audioCtx.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.2);
+                oscillator.start();
+                oscillator.stop(audioCtx.currentTime + 0.2);
+            } else if (type === 'end') {
+                oscillator.type = 'sawtooth';
+                oscillator.frequency.setValueAtTime(400, audioCtx.currentTime);
+                oscillator.frequency.exponentialRampToValueAtTime(100, audioCtx.currentTime + 1);
+                gainNode.gain.setValueAtTime(0.3, audioCtx.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 1);
+                oscillator.start();
+                oscillator.stop(audioCtx.currentTime + 1);
+            }
+        }
+
+        // --- STREAMING_CHUNK: Math & Biomechanics Helper Functions... ---
+        
+        /**
+         * Calculates the angle between three points (A, B, C) where B is the vertex.
+         * Used to calculate elbow angle (Shoulder -> Elbow -> Wrist).
+         */
+        function calculateAngle(a, b, c) {
+            const radians = Math.atan2(c.y - b.y, c.x - b.x) - Math.atan2(a.y - b.y, a.x - b.x);
+            let angle = Math.abs((radians * 180.0) / Math.PI);
+            if (angle > 180.0) {
+                angle = 360.0 - angle;
+            }
+            return angle;
+        }
+
+        // --- Visual Effects ---
+        function triggerRepEffect() {
+            // Flash screen
+            canvasElement.classList.add('rep-flash');
+            setTimeout(() => canvasElement.classList.remove('rep-flash'), 150);
+            
+            // Floating number
+            const floatNum = document.createElement('div');
+            floatNum.className = 'floating-number';
+            floatNum.innerText = '+1';
+            // Randomize position near center
+            floatNum.style.left = `calc(50% + ${(Math.random() - 0.5) * 100}px)`;
+            floatNum.style.top = '50%';
+            document.body.appendChild(floatNum);
+            
+            setTimeout(() => floatNum.remove(), 1000);
+        }
+
+        // --- STREAMING_CHUNK: Pose Processing Logic... ---
+        function onResults(results) {
+            // Setup canvas
+            canvasElement.width = videoElement.videoWidth;
+            canvasElement.height = videoElement.videoHeight;
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            
+            // Draw video frame
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+            if (results.poseLandmarks) {
+                // Determine connection color based on stage
+                let lineColor = '#ffffff'; // Default White
+                if (pushupStage === 'down') lineColor = '#888888'; // Gray when down
+                
+                // Draw skeleton
+                drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS,
+                               {color: lineColor, lineWidth: 3});
+                drawLandmarks(canvasCtx, results.poseLandmarks,
+                              {color: '#000000', lineWidth: 1, radius: 3});
+
+                // Core Logic (Only if playing)
+                if (isPlaying) {
+                    const landmarks = results.poseLandmarks;
+                    
+                    // Left Arm (11: Shoulder, 13: Elbow, 15: Wrist)
+                    const leftShoulder = landmarks[11];
+                    const leftElbow = landmarks[13];
+                    const leftWrist = landmarks[15];
+                    
+                    // Right Arm (12: Shoulder, 14: Elbow, 16: Wrist)
+                    const rightShoulder = landmarks[12];
+                    const rightElbow = landmarks[14];
+                    const rightWrist = landmarks[16];
+
+                    // Check visibility to ensure user is in frame (threshold > 0.5)
+                    const isVisible = (leftShoulder.visibility > 0.5 && leftElbow.visibility > 0.5 && leftWrist.visibility > 0.5) ||
+                                      (rightShoulder.visibility > 0.5 && rightElbow.visibility > 0.5 && rightWrist.visibility > 0.5);
+
+                    if (!isVisible) {
+                        formFeedback.innerText = "BODY NOT VISIBLE";
+                        formFeedback.style.color = "#ffffff";
+                        formFeedback.style.opacity = 1;
+                        return; // Skip calculation if body is hidden
+                    }
+
+                    // Calculate Angles
+                    const leftAngle = calculateAngle(leftShoulder, leftElbow, leftWrist);
+                    const rightAngle = calculateAngle(rightShoulder, rightElbow, rightWrist);
+                    
+                    // Use the average angle, or max/min depending on preference. Average is stable.
+                    const avgAngle = (leftAngle + rightAngle) / 2;
+
+                    // Pushup State Machine
+                    if (avgAngle > ANGLE_UP_THRESHOLD) {
+                        if (pushupStage === "down") {
+                            // Completed a rep!
+                            score++;
+                            hudScore.innerText = score;
+                            playBeep('up');
+                            triggerRepEffect();
+                            formFeedback.innerText = "GOOD REP";
+                            formFeedback.style.color = "#ffffff";
+                            formFeedback.style.opacity = 1;
+                            setTimeout(() => { if(isPlaying) formFeedback.style.opacity = 0; }, 1000);
+                        }
+                        pushupStage = "up";
+                        hudStage.innerText = "UP";
+                        hudStage.style.color = "#ffffff";
+                    } 
+                    else if (avgAngle < ANGLE_DOWN_THRESHOLD) {
+                        if (pushupStage === "up") {
+                            // Hit the bottom of the movement
+                            playBeep('down');
+                            formFeedback.innerText = "PUSH";
+                            formFeedback.style.color = "#aaaaaa";
+                            formFeedback.style.opacity = 1;
+                        }
+                        pushupStage = "down";
+                        hudStage.innerText = "DOWN";
+                        hudStage.style.color = "#aaaaaa";
+                    }
+                }
+            } else {
+                if (isPlaying) {
+                    formFeedback.innerText = "NO POSE DETECTED";
+                    formFeedback.style.color = "#ffffff";
+                    formFeedback.style.opacity = 1;
+                }
+            }
+            canvasCtx.restore();
+        }
+
+        // --- STREAMING_CHUNK: Initializing MediaPipe and Camera... ---
+        const pose = new Pose({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+        }});
+
+        pose.setOptions({
+            modelComplexity: 1, // Balance of speed/accuracy (0, 1, or 2)
+            smoothLandmarks: true,
+            enableSegmentation: false,
+            smoothSegmentation: false,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        pose.onResults(onResults);
+
+        // Signal when ML model is ready
+        pose.initialize().then(() => {
+            isModelLoaded = true;
+            loadingIndicator.classList.add('hidden');
+            btnStart.classList.remove('hidden');
+        });
+
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
+                await pose.send({image: videoElement});
+            },
+            width: 640,
+            height: 480
+        });
+
+        // Start camera feed instantly for background effect
+        camera.start().catch(err => {
+            alert("Camera access is required for this game. Please enable permissions and refresh.");
+        });
+
+        // --- STREAMING_CHUNK: Game Loop and Flow Control... ---
+        
+        function startGame() {
+            // Reset variables
+            score = 0;
+            timeLeft = GAME_DURATION;
+            pushupStage = "up";
+            isPlaying = true;
+            
+            // Update UI
+            hudScore.innerText = score;
+            hudTimer.innerText = timeLeft;
+            hudStage.innerText = "READY";
+            formFeedback.innerText = "BEGIN!";
+            formFeedback.style.opacity = 1;
+            setTimeout(() => { if(isPlaying) formFeedback.style.opacity = 0; }, 2000);
+            
+            // Switch Screens
+            screenMenu.classList.add('hidden');
+            screenResult.classList.add('hidden');
+            screenGame.classList.remove('hidden');
+            
+            // Start Audio Context if suspended
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+
+            // Timer Loop
+            timerInterval = setInterval(() => {
+                timeLeft--;
+                hudTimer.innerText = timeLeft;
+                
+                // Visual warning when time is low
+                if (timeLeft <= 10) {
+                    hudTimer.classList.add('animate-pulse');
+                    hudTimer.style.color = '#888';
+                }
+
+                if (timeLeft <= 0) {
+                    endGame();
+                }
+            }, 1000);
+        }
+
+        function endGame() {
+            isPlaying = false;
+            clearInterval(timerInterval);
+            
+            // Audio/Visuals
+            playBeep('end');
+            hudTimer.classList.remove('animate-pulse');
+            hudTimer.style.color = ''; // reset to stylesheet
+            
+            // Update UI
+            resultScore.innerText = score;
+            playerNameInput.value = ""; // clear input
+            btnSave.disabled = false;
+            btnSave.innerText = "SAVE";
+            btnSave.classList.remove('bg-gray-800', 'text-gray-500');
+            btnSave.classList.add('bg-white', 'text-black', 'hover:bg-gray-200');
+            
+            // Switch Screens
+            screenGame.classList.add('hidden');
+            screenResult.classList.remove('hidden');
+            screenResult.classList.add('flex'); // Because it's flex-col
+        }
+
+        // --- STREAMING_CHUNK: Leaderboard System (Local Storage)... ---
+        
+        const LEADERBOARD_KEY = 'cyberpush_leaderboard';
+
+        function getLeaderboard() {
+            const data = localStorage.getItem(LEADERBOARD_KEY);
+            return data ? JSON.parse(data) : [];
+        }
+
+        function saveScore(name, score) {
+            const board = getLeaderboard();
+            board.push({ name: name || 'ANON', score: score, date: new Date().toISOString() });
+            // Sort descending
+            board.sort((a, b) => b.score - a.score);
+            // Keep top 10
+            const top10 = board.slice(0, 10);
+            localStorage.setItem(LEADERBOARD_KEY, JSON.stringify(top10));
+        }
+
+        function renderLeaderboard() {
+            const board = getLeaderboard();
+            const container = document.getElementById('leaderboard-list');
+            container.innerHTML = '';
+
+            if (board.length === 0) {
+                container.innerHTML = '<div class="p-8 text-center text-gray-500 text-sm tracking-widest uppercase">No records found.</div>';
+                return;
+            }
+
+            board.forEach((entry, index) => {
+                const isTop = index === 0;
+                const row = document.createElement('div');
+                row.className = `px-6 py-5 border-b border-gray-800 flex justify-between items-center ${isTop ? 'bg-white text-black' : 'hover:bg-gray-900 text-white'} transition-colors`;
+                
+                row.innerHTML = `
+                    <div class="flex items-center gap-6">
+                        <span class="text-xl font-bold ${isTop ? 'text-black' : 'text-gray-500 w-6'}">${index + 1}</span>
+                        <span class="font-bold text-sm tracking-widest uppercase">${entry.name}</span>
+                    </div>
+                    <span class="text-2xl font-black ${isTop ? 'text-black' : 'text-white'}">${entry.score}</span>
+                `;
+                container.appendChild(row);
+            });
+        }
+
+        // --- Event Listeners ---
+        
+        btnStart.addEventListener('click', startGame);
+        
+        btnRetry.addEventListener('click', () => {
+            screenResult.classList.add('hidden');
+            screenResult.classList.remove('flex');
+            startGame();
+        });
+
+        btnSave.addEventListener('click', () => {
+            if (btnSave.disabled) return;
+            const name = playerNameInput.value.trim() || 'PLAYER1';
+            saveScore(name, score);
+            
+            // Visual feedback
+            btnSave.innerText = "SAVED";
+            btnSave.classList.remove('bg-white', 'text-black', 'hover:bg-gray-200');
+            btnSave.classList.add('bg-gray-800', 'text-gray-500');
+            btnSave.disabled = true;
+            
+            setTimeout(() => {
+                screenResult.classList.add('hidden');
+                screenResult.classList.remove('flex');
+                renderLeaderboard();
+                screenLeaderboard.classList.remove('hidden');
+                screenLeaderboard.classList.add('flex');
+            }, 1000);
+        });
+
+        btnLeaderboard.addEventListener('click', () => {
+            renderLeaderboard();
+            screenMenu.classList.add('hidden');
+            screenLeaderboard.classList.remove('hidden');
+            screenLeaderboard.classList.add('flex');
+        });
+
+        btnCloseLeaderboard.addEventListener('click', () => {
+            screenLeaderboard.classList.add('hidden');
+            screenLeaderboard.classList.remove('flex');
+            screenMenu.classList.remove('hidden');
+        });
+
+    </script>
+</body>
+</html>
